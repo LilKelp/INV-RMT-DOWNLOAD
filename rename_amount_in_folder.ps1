@@ -17,6 +17,22 @@ function Parse-AmountFromText {
   return ''
 }
 
+function Parse-DocumentReference {
+  param([Parameter(Mandatory)][string]$Text)
+  $patterns = @(
+    '(?is)document\s+ref[\s\S]{0,120}?no[:\s]*([A-Za-z0-9-]+)',
+    '(?is)reference\s+number[:\s]*([A-Za-z0-9-]+)'
+  )
+  foreach($p in $patterns){
+    $m = [regex]::Match($Text,$p)
+    if ($m.Success) {
+      $raw = $m.Groups[1].Value.Trim()
+      if ($raw) { return ($raw -replace '\s','') }
+    }
+  }
+  return ''
+}
+
 function Try-RenameWithAmount {
   param([Parameter(Mandatory)][string]$Path)
   if (-not (Test-Path -LiteralPath $Path)) { return $Path }
@@ -87,12 +103,25 @@ function Try-RenameWithAmount {
   if (-not $text) { return $Path }
   $amt = Parse-AmountFromText -Text $text
   if (-not $amt) { return $Path }
+  $docRef = Parse-DocumentReference -Text $text
   $dir = Split-Path -Parent $Path
   $name = [IO.Path]::GetFileNameWithoutExtension($Path)
   $ext  = [IO.Path]::GetExtension($Path)
-  if ($name -match ' - \d[\d,]*\.?\d{0,2}$') { return $Path }
-  $new = Join-Path $dir ("{0} - {1}{2}" -f $name, ($amt -replace '[\\/:*?"<>|]','_'), $ext)
-  $n=1; $cand=$new; while(Test-Path -LiteralPath $cand){ $cand = Join-Path $dir ("{0} - {1} ({2}){3}" -f $name, ($amt -replace '[\\/:*?"<>|]','_'), $n, $ext); $n++ }
+  $hasAmtSuffix = $false
+  $baseName = $name
+  if ($name -match '^(.*) - \d[\d,]*\.?\d{0,2}$') {
+    $hasAmtSuffix = $true
+    $baseName = $Matches[1]
+  }
+  $safeDoc = $null
+  if ($docRef) { $safeDoc = ($docRef -replace '[\\/:*?"<>|]','_') }
+  if (-not $safeDoc -and $hasAmtSuffix) { return $Path }
+  if ($safeDoc -and $hasAmtSuffix -and $baseName -eq $safeDoc) { return $Path }
+  $prefix = if ($safeDoc) { $safeDoc } else { $baseName }
+  $safePrefix = ($prefix -replace '[\\/:*?"<>|]','_')
+  $safeAmt = ($amt -replace '[\\/:*?"<>|]','_')
+  $new = Join-Path $dir ("{0} - {1}{2}" -f $safePrefix, $safeAmt, $ext)
+  $n=1; $cand=$new; while(Test-Path -LiteralPath $cand){ $cand = Join-Path $dir ("{0} - {1} ({2}){3}" -f $safePrefix, $safeAmt, $n, $ext); $n++ }
   Move-Item -LiteralPath $Path -Destination $cand
   Write-Host ("Renamed with amount: {0}" -f $cand)
   return $cand
