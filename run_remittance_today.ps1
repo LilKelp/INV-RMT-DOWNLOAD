@@ -10,7 +10,13 @@ param(
   [int]$MaxItems = 300,
   [switch]$FastScan,
   [switch]$Broad,
-  [string[]]$AllowSenders = @('SharedServicesAccountsPayable@act.gov.au','finance@yourremittance.com.au','noreply_remittances@mater.org.au')
+  [string[]]$AllowSenders = @(
+    'SharedServicesAccountsPayable@act.gov.au',
+    'finance@yourremittance.com.au',
+    'noreply_remittances@mater.org.au',
+    'payments@nzdf.mil.nz',
+    'HSNSW-scnremit@gateway2.messagexchange.com'
+  )
 )
 
 Set-StrictMode -Version Latest
@@ -52,6 +58,41 @@ function Parse-AmountFromText {
   )
   foreach($p in $patterns){ $m=[regex]::Match($Text,$p); if($m.Success){ $raw=$m.Groups[1].Value.Trim(); return ($raw -replace '\s','') } }
   return ''
+}
+
+function Parse-DocumentReference {
+  param([Parameter(Mandatory)][string]$Text)
+  $patterns = @(
+    '(?is)document\s+ref[\s\S]{0,120}?no[:\s]*([A-Za-z0-9-]+)',
+    '(?is)reference\s+number[:\s]*([A-Za-z0-9-]+)'
+  )
+  foreach($p in $patterns){
+    $m = [regex]::Match($Text,$p)
+    if ($m.Success) {
+      $raw = $m.Groups[1].Value.Trim()
+      if ($raw) { return ($raw -replace '\s','') }
+    }
+  }
+  return ''
+}
+
+function Get-SafeName {
+  param([string]$Value)
+  if ([string]::IsNullOrWhiteSpace($Value)) { return '' }
+  return ($Value -replace '[\\/:*?"<>|]','_')
+}
+
+function Remember-ProcessedKey {
+  param(
+    [Parameter(Mandatory)][psobject]$Info,
+    [Parameter(Mandatory)][string]$Key
+  )
+  if (-not $Info) { return }
+  try {
+    if ($Info.Set.Add($Key)) {
+      Add-Content -Path $Info.File -Value $Key -Encoding UTF8
+    }
+  } catch {}
 }
 
 function Save-MailAsMsg {
@@ -146,18 +187,42 @@ function Try-RenameWithAmount {
   if (-not $text) { return $Path }
   $amt = Parse-AmountFromText -Text $text
   if (-not $amt) { return $Path }
+  $docRef = Parse-DocumentReference -Text $text
   $dir = Split-Path -Parent $Path
   $name = [System.IO.Path]::GetFileNameWithoutExtension($Path)
   $ext = [System.IO.Path]::GetExtension($Path)
-  $new = Join-Path $dir ("{0} - {1}{2}" -f $name, ($amt -replace '[\\/:*?"<>|]','_'), $ext)
-  $n=1; $cand=$new; while(Test-Path -LiteralPath $cand){ $cand = Join-Path $dir ("{0} - {1} ({2}){3}" -f $name, ($amt -replace '[\\/:*?"<>|]','_'), $n, $ext); $n++ }
+  $hasAmtSuffix = $false
+  $baseName = $name
+  if ($name -match '^(.*) - \d[\d,]*\.?\d{0,2}$') {
+    $hasAmtSuffix = $true
+    $baseName = $Matches[1]
+  }
+  $safeDoc = $null
+  if ($docRef) { $safeDoc = ($docRef -replace '[\\/:*?"<>|]','_') }
+  if (-not $safeDoc -and $hasAmtSuffix) { return $Path }
+  if ($safeDoc -and $hasAmtSuffix -and $baseName -eq $safeDoc) { return $Path }
+  $prefix = if ($safeDoc) { $safeDoc } else { $baseName }
+  $safePrefix = ($prefix -replace '[\\/:*?"<>|]','_')
+  $safeAmt = ($amt -replace '[\\/:*?"<>|]','_')
+  $target = Join-Path $dir ("{0} - {1}{2}" -f $safePrefix, $safeAmt, $ext)
+  if (Test-Path -LiteralPath $target) {
+    try {
+      $existing = Get-Item -LiteralPath $target -ErrorAction Stop
+      $current = Get-Item -LiteralPath $Path -ErrorAction Stop
+      if ($existing.Length -eq $current.Length) {
+        Remove-Item -LiteralPath $Path -Force
+        Write-Host ("Duplicate already exists: {0}" -f $target)
+        return $target
+      }
+    } catch {}
+  }
+  $n=1; $cand=$target; while(Test-Path -LiteralPath $cand){ $cand = Join-Path $dir ("{0} - {1} ({2}){3}" -f $safePrefix, $safeAmt, $n, $ext); $n++ }
   Move-Item -LiteralPath $Path -Destination $cand
   Write-Host ("Renamed with amount: {0}" -f $cand)
   return $cand
 }
 
 try {
-  if (-not $SaveRoot) { $SaveRoot = Join-Path (Get-Location) 'Inv&Remit_Today' }
   $selectedDate = $null
   if ($PSBoundParameters.ContainsKey('Date') -and $Date) {
     $formats = @('yyyyMMdd','yyyy-MM-dd','yyyy/MM/dd')
@@ -166,6 +231,34 @@ try {
   } else { $selectedDate = (Get-Date) }
   $selectedDate = $selectedDate.Date
   $dateFolder = $selectedDate.ToString('yyyy-MM-dd')
+
+  $scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+  if (-not $PSBoundParameters.ContainsKey('SaveRoot') -or [string]::IsNullOrWhiteSpace($SaveRoot)) {
+    $defaultRoot = Join-Path (Join-Path $scriptRoot '03-outputs') 'remittance-runner'
+    $SaveRoot = Join-Path (Join-Path $defaultRoot $dateFolder) 'files'
+  }
+  $SaveRoot = [IO.Path]::GetFullPath($SaveRoot)
+  if (-not (Test-Path -LiteralPath $SaveRoot)) {
+    New-Item -ItemType Directory -Path $SaveRoot -Force -ErrorAction SilentlyContinue | Out-Null
+  }
+  $processedDir = Join-Path (Split-Path $SaveRoot -Parent) 'processed'
+  New-Item -ItemType Directory -Path $processedDir -Force -ErrorAction SilentlyContinue | Out-Null
+  $processedMaps = @{}
+  foreach($storeName in $stores){
+    $safeStore = Get-SafeName -Value $storeName
+    if (-not $safeStore) { $safeStore = 'store' }
+    $procFile = Join-Path $processedDir ("processed-{0}.txt" -f $safeStore)
+    $set = New-Object 'System.Collections.Generic.HashSet[string]'
+    if (Test-Path -LiteralPath $procFile) {
+      try {
+        foreach($line in Get-Content -LiteralPath $procFile -ErrorAction SilentlyContinue){
+          $trim = $line.Trim()
+          if ($trim) { [void]$set.Add($trim) }
+        }
+      } catch {}
+    }
+    $processedMaps[$storeName] = [PSCustomObject]@{ File = $procFile; Set = $set }
+  }
 
   $outlook = Get-OutlookApp
   $ns = $outlook.GetNamespace('MAPI')
@@ -186,10 +279,12 @@ try {
   $fEnd   = $end.ToString('MM/dd/yyyy hh:mm tt')
   $restriction = "[ReceivedTime] >= '$fStart' AND [ReceivedTime] < '$fEnd'"
 
-  $subjectRegex = [regex]::new('remittance','IgnoreCase')
-  $fileNameRegex = [regex]::new('remit','IgnoreCase')
+  $subjectRegex = [regex]::new('remittance|payment\s*advice|remittance\s*advice|payment\s*remittance|funds\s*transfer|eft\s*remittance','IgnoreCase')
+  $fileNameRegex = [regex]::new('(remit|remittance|payment[\s_-]*advice|remit[\s_-]*advice|remittance[\s_-]*advice)','IgnoreCase')
   $allowedExtRegex = [regex]::new('\.(pdf)$','IgnoreCase')
   $imageExtRegex = [regex]::new('\.(png|jpg|jpeg|gif|bmp|svg|webp)$','IgnoreCase')
+  $negativeSubjectRegex = [regex]::new('\b(statement|stmt|supplier\s*form|form|purchase\s*order|order)\b','IgnoreCase')
+  $negativeFileNameRegex = [regex]::new('(statement|\bstmt\b|supplier[\s_-]*form|\bform\b|purchase[\s_-]*order|purchaseorder|\border\b|\bpo\d*\b)','IgnoreCase')
   $blockedAddrs = @('NZ-AR@NOVABIO.COM','AU-AR@NOVABIO.COM','au-orders@novabio.com','azhao@novabio.com') | ForEach-Object { $_.ToLower() }
   $allowAddrs = $AllowSenders | ForEach-Object { $_.ToLower() }
   $seen = New-Object 'System.Collections.Generic.HashSet[string]'
@@ -215,14 +310,16 @@ try {
     } catch {}
   }
 
+  $storeDirs = @{}
   foreach($storeName in $stores){
     $store = ($ns.Folders | Where-Object { $_.Name -eq $storeName })
     if (-not $store) { Write-Host "Store not found: $storeName"; continue }
     $rootFolder = $store.Folders.Item('Inbox')
     if (-not $rootFolder) { continue }
-    $storeRoot = Join-Path $SaveRoot $storeName
-    $saveDir   = Join-Path $storeRoot $dateFolder
+    $saveDir = Join-Path $SaveRoot $storeName
+    $storeDirs[$storeName] = $saveDir
     New-Item -ItemType Directory -Path $saveDir -Force | Out-Null
+    $processedInfo = if ($processedMaps.ContainsKey($storeName)) { $processedMaps[$storeName] } else { $null }
     $queue = New-Object System.Collections.Generic.Queue[Object]
     $queue.Enqueue($rootFolder)
     while($queue.Count -gt 0){
@@ -246,6 +343,9 @@ try {
       foreach($item in $iter){
         $isMail = $false; try { if ($item -and $item.Class -eq 43) { $isMail=$true } } catch {}
         if (-not $isMail) { continue }
+        $entryId = ''
+        try { $entryId = [string]$item.EntryID } catch {}
+        if (-not $entryId) { $entryId = [guid]::NewGuid().ToString() }
         try { $rt = [datetime]$item.ReceivedTime } catch { $rt = $null }
         if ($rt -and ($rt -lt $start -or $rt -ge $end)) { continue }
         $sender = ''
@@ -272,6 +372,8 @@ try {
         }
         # Only proceed if subject mentions remittance or at least one attachment filename does
         $subjectMatch = $false; try { $subjectMatch = $subjectRegex.IsMatch($subj) } catch { $subjectMatch = $false }
+        $subjectLower = ''; try { $subjectLower = $subj.ToLower() } catch { $subjectLower = '' }
+        $subjectNegative = $false; if ($subjectLower) { $subjectNegative = ($subjectLower -like '*form*' -or $subjectLower -like '*statement*' -or $subjectLower -like '*stmt*' -or $subjectLower -like '*purchase*order*' -or $subjectLower -like '*order*') }
         $atts = $item.Attachments
         if (-not $atts -or $atts.Count -le 0) { continue }
         $nameMatch = $false
@@ -281,13 +383,21 @@ try {
         if (-not $Broad -and -not $allowOverride) {
           if (-not ($subjectMatch -or $nameMatch)) { continue }
         }
+        if ($Broad -and -not $allowOverride) {
+          if ($subjectNegative -and -not $subjectMatch) { continue }
+        }
         $storeDir = $saveDir
         for($i=1; $i -le $atts.Count; $i++){
           $att = $atts.Item($i); if(-not $att){ continue }
           $fn = [string]$att.FileName
+          $procSet = if ($processedInfo) { $processedInfo.Set } else { $null }
+          $entryKey = ("{0}|{1}" -f $entryId,$i)
+          if ($procSet -and $procSet.Contains($entryKey)) { Write-Host "Skip duplicate attachment $entryKey for $storeName"; continue }
           $isInline = $false
           try { $cid = $att.PropertyAccessor.GetProperty('http://schemas.microsoft.com/mapi/proptag/0x3712001F'); if($cid){$isInline=$true} } catch {}
           if ($isInline -and $imageExtRegex.IsMatch($fn)) { continue }
+          $fnLower = $fn.ToLower()
+          if ($fnLower -like '*form*' -or $fnLower -like '*supplier*form*' -or $fnLower -like '*statement*' -or $fnLower -like '*stmt*' -or $fnLower -like '*purchase*order*' -or $fnLower -like '*purchaseorder*' -or $fnLower -like '* order *') { continue }
           if (-not $allowedExtRegex.IsMatch($fn)) { continue }
           $safe = $fn -replace '[\\/:*?"<>|]','_'
           $attSize = 0; try { $attSize = [int]$att.Size } catch {}
@@ -299,7 +409,11 @@ try {
             $base = [IO.Path]::GetFileNameWithoutExtension($safe)
             $ext  = [IO.Path]::GetExtension($safe)
             $cand = Join-Path $storeDir ("{0} - {1}{2}" -f $base, ($amtFromMail -replace '[\\/:*?"<>|]','_'), $ext)
-            $n=1; while(Test-Path -LiteralPath $cand){ $cand = Join-Path $storeDir ("{0} - {1} ({2}){3}" -f $base, ($amtFromMail -replace '[\\/:*?"<>|]','_'), $n, $ext); $n++ }
+            if (Test-Path -LiteralPath $cand) {
+              Write-Host "Attachment already stored at $cand; skipping duplicate save."
+              Remember-ProcessedKey -Info $processedInfo -Key $entryKey
+              continue
+            }
           } else {
             $path = Join-Path $storeDir $safe
             $n=1; $cand=$path; while(Test-Path -LiteralPath $cand){ $cand = Join-Path $storeDir ("{0} ({1}){2}" -f ([IO.Path]::GetFileNameWithoutExtension($safe)), $n, [IO.Path]::GetExtension($safe)); $n++ }
@@ -312,11 +426,14 @@ try {
               if ($newPath -and (Test-Path -LiteralPath $newPath)) {
                 if ($newPath -ne $cand -and (Test-Path -LiteralPath $cand)) { Remove-Item -LiteralPath $cand -Force }
                 Write-Host "Saved: $newPath"
+                Remember-ProcessedKey -Info $processedInfo -Key $entryKey
               } else {
                 Write-Host "Saved: $cand"
+                Remember-ProcessedKey -Info $processedInfo -Key $entryKey
               }
             } else {
               Write-Host "Saved: $cand"
+              Remember-ProcessedKey -Info $processedInfo -Key $entryKey
             }
           } catch { Write-Warning "Failed to save attachment '$fn': $($_.Exception.Message)" }
         }
@@ -325,11 +442,30 @@ try {
   }
   if ($PSBoundParameters.ContainsKey('PruneOriginals') -and $PruneOriginals) {
     foreach($storeName in $stores){
-      $storeDir = Join-Path $saveDir $storeName
-      if (Test-Path -LiteralPath $storeDir) { Remove-OriginalsWithoutAmountSuffix -Dir $storeDir }
+      if ($storeDirs.ContainsKey($storeName)) {
+        $storeDir = $storeDirs[$storeName]
+        if (Test-Path -LiteralPath $storeDir) { Remove-OriginalsWithoutAmountSuffix -Dir $storeDir }
+      }
     }
   }
-  Write-Host ("Save folder: {0}" -f $saveDir)
+  $msgFiles = @(Get-ChildItem -LiteralPath $SaveRoot -Recurse -Filter *.msg -ErrorAction SilentlyContinue)
+  if ($msgFiles -and $msgFiles.Count -gt 0) {
+    try {
+      $pythonCmd = Get-Command python -ErrorAction Stop
+      $pyScript = Join-Path $scriptRoot 'download_yourremittance.py'
+      if (Test-Path -LiteralPath $pyScript) {
+        $arguments = @($pyScript, '--date', $dateFolder, '--base-dir', $SaveRoot, '--stores')
+        $arguments += $stores
+        Write-Host "Triggering secure remittance fetcher..."
+        & $pythonCmd.Source @arguments
+      } else {
+        Write-Warning "download_yourremittance.py not found; skipping secure fetch."
+      }
+    } catch {
+      Write-Warning ("Secure remittance fetcher failed: {0}" -f $_.Exception.Message)
+    }
+  }
+  Write-Host ("Saved files under: {0}" -f $SaveRoot)
 } catch {
   Write-Error $_
   exit 1
