@@ -3,7 +3,11 @@ param(
   [string]$SaveRoot,
   [switch]$Recurse,
   [string]$Date,
-  [string]$TimeZoneId = 'AUS Eastern Standard Time'
+  [string]$TimeZoneId = 'AUS Eastern Standard Time',
+  [switch]$Broad,
+  [string[]]$AllowSenders,
+  [switch]$FastScan,
+  [int]$MaxItems = 400
 )
 
 Set-StrictMode -Version Latest
@@ -163,22 +167,41 @@ try {
 
   # No invoice renaming; keep original filenames
 
+  $allowAddrs = @(); if ($AllowSenders){ $allowAddrs = $AllowSenders | ForEach-Object { if($_){ $_.ToLower() } else { '' } } }
+  $seen = New-Object 'System.Collections.Generic.HashSet[string]'
+
   $queue = New-Object System.Collections.Generic.Queue[Object]
   $queue.Enqueue($rootFolder)
   while($queue.Count -gt 0){
     $folder = $queue.Dequeue()
     if ($Recurse) { foreach($sub in $folder.Folders){ $queue.Enqueue($sub) } }
-    $items = $folder.Items; $items.IncludeRecurrences=$true; $items.Sort('[ReceivedTime]'); $todayItems=$items.Restrict($restriction)
-    foreach($item in $todayItems){
+    $items = $folder.Items; $items.IncludeRecurrences=$true; $items.Sort('[ReceivedTime]')
+    $iter = @()
+    if ($FastScan -or $PSBoundParameters.ContainsKey('MaxItems')) {
+      $cnt = 0; try { $cnt = [int]$items.Count } catch { $cnt = 0 }
+      $startIdx = [Math]::Max(1, $cnt - [Math]::Max(1,$MaxItems) + 1)
+      for ($idx = $cnt; $idx -ge $startIdx; $idx--) { $iter += $items.Item($idx) }
+    } else {
+      $iter = $items.Restrict($restriction)
+    }
+    foreach($item in $iter){
       $isMail = $false; try { if ($item -and $item.Class -eq 43) { $isMail=$true } } catch {}
       if (-not $isMail) { continue }
+      try { $rt = [datetime]$item.ReceivedTime } catch { $rt = $null }
+      if ($rt -and ($rt -lt $start -or $rt -ge $end)) { continue }
+      $senderLower = ''
+      try { $senderLower = (Get-SenderSmtp -Mail $item).ToLower() } catch { $senderLower = '' }
+      $allowOverride = ($allowAddrs -contains $senderLower)
       $subj=''; try { $subj=[string]$item.Subject } catch {}
       $atts = $item.Attachments
       if (-not $atts -or $atts.Count -le 0) { continue }
       $subjectMatch = $false; try { $subjectMatch = $subjectRegex.IsMatch($subj) } catch { $subjectMatch = $false }
+      $subjectLower = ''; try { $subjectLower = $subj.ToLower() } catch { $subjectLower = '' }
+      $subjectNegative = $false; if ($subjectLower) { $subjectNegative = ($subjectLower -like '*form*' -or $subjectLower -like '*statement*' -or $subjectLower -like '*stmt*' -or $subjectLower -like '*purchase*order*' -or $subjectLower -like '*order*' -or $subjectLower -like '*remit*' -or $subjectLower -like '*remittance*' -or $subjectLower -like '*advice*') }
       $attNameMatch = $false
       try { for($ti=1; $ti -le $atts.Count; $ti++){ $tfn=[string]$atts.Item($ti).FileName; if ($tfn -match '(?i)\b(inv|invoice)\b'){ $attNameMatch=$true; break } } } catch { $attNameMatch=$false }
-      if (-not ($subjectMatch -or $attNameMatch)) { continue }
+      if (-not $Broad -and -not $allowOverride) { if (-not ($subjectMatch -or $attNameMatch)) { continue } }
+      if ($Broad -and -not $allowOverride) { if ($subjectNegative -and -not $subjectMatch) { continue } }
       $storeRoot = Join-Path $SaveRoot $storeName
       $storeDir  = Join-Path $storeRoot $dateFolder
       New-Item -ItemType Directory -Path $storeDir -Force | Out-Null
@@ -188,9 +211,18 @@ try {
         $isInline = $false
         try { $cid = $att.PropertyAccessor.GetProperty('http://schemas.microsoft.com/mapi/proptag/0x3712001F'); if($cid){$isInline=$true} } catch {}
         if ($isInline -and $imageExtRegex.IsMatch($fn)) { continue }
+        if ($Broad) {
+          $fnLower = $fn.ToLower()
+          if ($fnLower -like '*form*' -or $fnLower -like '*supplier*form*' -or $fnLower -like '*statement*' -or $fnLower -like '*stmt*' -or $fnLower -like '*purchase*order*' -or $fnLower -like '*purchaseorder*' -or $fnLower -like '* order *' -or $fnLower -like '*remit*' -or $fnLower -like '*remittance*' -or $fnLower -like '*advice*') { continue }
+        }
         if (-not $allowedExtRegex.IsMatch($fn)) { continue }
         $safe = $fn -replace '[\\/:*?"<>|]','_'
+        $attSize = 0; try { $attSize = [int]$att.Size } catch {}
+        $key = ("{0}|{1}|{2}|{3}" -f ([string]$item.EntryID), $i, $safe.ToLower(), $attSize)
+        if ($seen.Contains($key)) { continue } else { [void]$seen.Add($key) }
         $path = Join-Path $storeDir $safe
+        # Idempotency: skip if a file with same name already exists
+        if (Test-Path -LiteralPath $path) { Write-Host "Skipped duplicate: $path"; continue }
         $n=1; $cand=$path; while(Test-Path -LiteralPath $cand){ $cand = Join-Path $storeDir ("{0} ({1}){2}" -f ([IO.Path]::GetFileNameWithoutExtension($safe)), $n, [IO.Path]::GetExtension($safe)); $n++ }
         try { $att.SaveAsFile($cand); Write-Host "Saved: $cand" } catch { Write-Warning "Failed to save attachment '$fn': $($_.Exception.Message)" }
       }
