@@ -47,7 +47,7 @@
 |     |- llms/
 |     \- _categories-README.md
 |- 02-inputs/{downloads/, snapshots/}
-|- 03-outputs/{README.md, remittance-runner/, invoices-runner/, remit-rename-amount/, processed/, image-cleanup/, report-writer/}
+|- 03-outputs/{README.md, remittance-runner/, invoices-runner/}
 
    (repo root also includes .vscode/, AGENTS.md, INITIAL_SYSTEM_PROMPT.md, temp-*.txt)
 ```
