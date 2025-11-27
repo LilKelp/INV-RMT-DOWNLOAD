@@ -16,7 +16,8 @@ param(
     'finance@yourremittance.com.au',
     'noreply_remittances@mater.org.au',
     'payments@nzdf.mil.nz',
-    'HSNSW-scnremit@gateway2.messagexchange.com'
+    'HSNSW-scnremit@gateway2.messagexchange.com',
+    'payables@ap1.fpim.health.nz'
   )
 )
 

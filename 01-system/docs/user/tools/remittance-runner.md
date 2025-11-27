@@ -1,6 +1,6 @@
 # remittance-runner
 **Category**: ops
-**Version**: v0.2 (Updated: 2025-11-27)
+**Version**: v0.3 (Updated: 2025-11-27)
 
 ## What it does
 - Collects remittance advices from Outlook (AU/NZ stores) and saves PDFs.
@@ -18,7 +18,7 @@
 - `Recurse` (switch): include subfolders.
 - `PruneOriginals` (switch): drop non-amount-suffixed duplicates.
 - `Broad` (switch): looser subject/filename filters.
-- `AllowSenders` (array): extra allowed sender addresses.
+- `AllowSenders` (array): extra allowed sender addresses (defaults include payments@nzdf.mil.nz, payables@ap1.fpim.health.nz, and core AU senders).
 
 ## Usage
 1) AU only fast scan:
@@ -31,7 +31,7 @@ powershell -NoProfile -File 01-system/tools/ops/remittance-runner/run.ps1 -Store
 ```
 3) Add allowed senders:
 ```
-powershell -NoProfile -File 01-system/tools/ops/remittance-runner/run.ps1 -Stores 'Australia AR' -Date 'YYYY-MM-DD' -AllowSenders 'payments@nzdf.mil.nz','HSNSW-scnremit@gateway2.messagexchange.com'
+powershell -NoProfile -File 01-system/tools/ops/remittance-runner/run.ps1 -Stores 'Australia AR','New Zealand AR' -Date 'YYYY-MM-DD' -AllowSenders 'payments@nzdf.mil.nz','payables@ap1.fpim.health.nz'
 ```
 
 ## Paths
