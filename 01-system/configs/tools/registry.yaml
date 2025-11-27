@@ -1,0 +1,62 @@
+# Tool Registry — Single Source of Truth
+# Entry points live under 01-system/tools/ops/<tool>/run.ps1 (scripts co-located with wrappers).
+# Each tool entry:
+# - name: unique-id
+#   category: llms|ops|stt|tts|vision|web|data|io|...
+#   args_schema: {}          # optional JSON Schema-style summary
+#   side_effects: []         # e.g., ["fs:03-outputs/<tool>/..."]
+#   timeout_s: 600
+tools:
+  - name: remittance-runner
+    category: ops
+    args_schema:
+      type: object
+      properties:
+        Stores: { type: array, items: { type: string } }
+        Date: { type: string, description: "YYYY-MM-DD or YYYYMMDD" }
+        TimeZoneId: { type: string, default: "AUS Eastern Standard Time" }
+        FastScan: { type: boolean, default: true }
+        MaxItems: { type: integer, default: 400 }
+        Recurse: { type: boolean, default: false }
+        PruneOriginals: { type: boolean, default: true }
+        Broad: { type: boolean, default: false }
+        AllowSenders: { type: array, items: { type: string } }
+      required: [Stores, Date]
+    side_effects:
+      - "fs:Inv&Remit_Today/<Store>/<YYYY-MM-DD>/..."
+      - "fs:03-outputs/remittance-runner/..."
+    timeout_s: 1800
+  - name: invoices-runner
+    category: ops
+    args_schema:
+      type: object
+      properties:
+        Date: { type: string, description: "YYYY-MM-DD or YYYYMMDD" }
+        TimeZoneId: { type: string, default: "AUS Eastern Standard Time" }
+        Recurse: { type: boolean, default: false }
+      required: [Date]
+    side_effects:
+      - "fs:Inv&Remit_Today/AZhao@novabio.com/<YYYY-MM-DD>/..."
+      - "fs:03-outputs/invoices-runner/..."
+    timeout_s: 1200
+  - name: remit-rename-amount
+    category: ops
+    args_schema:
+      type: object
+      properties:
+        Folder: { type: string }
+      required: [Folder]
+    side_effects:
+      - "fs:<Folder>/*.pdf"
+      - "fs:03-outputs/remit-rename-amount/..."
+    timeout_s: 900
+  - name: migrate-store-date
+    category: ops
+    args_schema:
+      type: object
+      properties:
+        DryRun: { type: boolean, default: true }
+      side_effects:
+        - "fs:Inv&Remit_Today/..."
+        - "fs:03-outputs/migrate-store-date/..."
+    timeout_s: 1200
