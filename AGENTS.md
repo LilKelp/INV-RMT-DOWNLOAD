@@ -59,6 +59,9 @@
 - Reference outputs with relative paths in the final message and in `SYSTEM_MEMORY.md` entries.
 - Remittance runner runs may include per-date `intermediate/msg-html`, `intermediate/msg-pdf`, and `intermediate/msg-src` folders for converted email artifacts; store folders should keep only final PDFs.
 
+### Runtimes (local-only)
+- Portable binaries live under `01-system/tools/runtimes/` (not tracked). After cloning, run `01-system/tools/ops/maintenance/install_poppler.ps1` to install Poppler (pdftotext auto-detect). Run `install_portable_git.ps1` only if the portable Git runtime is required.
+
 ### Where Things Live
 - **Playbooks:** `01-system/docs/agents/PLAYBOOKS.md` - first stop for mapping phrases to intents.
 - **Prompts Library:** `01-system/docs/prompts/` - shared, curated prompts indexed in `INDEX.md` (keep metadata current).
