@@ -3,7 +3,8 @@ Invoices_Today/
 Inv&Remit_Today/
 
 # Vendor tools (portable binaries)
-tools/
+/tools/
+01-system/tools/runtimes/
 
 # Common local clutter
 *.log
