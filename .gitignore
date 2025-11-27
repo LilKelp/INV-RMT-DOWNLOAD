@@ -1,6 +1,7 @@
 # Folders containing downloaded artifacts
 Invoices_Today/
 Inv&Remit_Today/
+03-outputs/
 
 # Vendor tools (portable binaries)
 /tools/
