@@ -40,6 +40,26 @@ function Get-OutlookApp {
   try { return [Runtime.InteropServices.Marshal]::GetActiveObject('Outlook.Application') } catch { return New-Object -ComObject Outlook.Application }
 }
 
+function Get-PrimarySmtpAddress {
+  param([Parameter(Mandatory)][object]$Item)
+  try {
+    $sender = $null
+    try { $sender = $Item.Sender } catch {}
+    $smtp = $null
+    if ($sender) {
+      try { $smtp = $sender.GetExchangeUser().PrimarySmtpAddress } catch {}
+      if (-not $smtp) { try { $smtp = $sender.PropertyAccessor.GetProperty('http://schemas.microsoft.com/mapi/proptag/0x39FE001E') } catch {} }
+      if (-not $smtp) { try { $smtp = $sender.PropertyAccessor.GetProperty('http://schemas.microsoft.com/mapi/proptag/0x5D01001F') } catch {} }
+    }
+    if (-not $smtp) {
+      try { $smtp = $Item.PropertyAccessor.GetProperty('http://schemas.microsoft.com/mapi/proptag/0x5D01001F') } catch {}
+      if (-not $smtp) { try { $smtp = $Item.PropertyAccessor.GetProperty('http://schemas.microsoft.com/mapi/proptag/0x39FE001E') } catch {} }
+    }
+    if ([string]::IsNullOrWhiteSpace($smtp)) { return $null }
+    return $smtp
+  } catch { return $null }
+}
+
 function Get-PdfToTextPath {
   $cmd = Get-Command pdftotext -ErrorAction SilentlyContinue
   if ($cmd) { return $cmd.Source }
@@ -181,6 +201,119 @@ function Save-MailAsMsg {
   } catch {
     Write-Warning ("Failed to save MSG: {0}" -f $_.Exception.Message)
     return $null
+  }
+}
+
+function Move-MsgFilesToIntermediate {
+  param(
+    [Parameter(Mandatory)][System.Collections.IEnumerable]$MsgFiles,
+    [Parameter(Mandatory)][string]$SaveRoot
+  )
+  if (-not $MsgFiles) { return }
+  $dateRoot = Split-Path -Parent $SaveRoot
+  if (-not $dateRoot) { return }
+  $intermediate = Join-Path $dateRoot 'intermediate'
+  $destRoot = Join-Path $intermediate 'msg-src'
+  foreach($msg in $MsgFiles){
+    if (-not $msg) { continue }
+    try {
+      $storeName = Split-Path -Leaf ($msg.DirectoryName)
+      if ([string]::IsNullOrWhiteSpace($storeName)) { $storeName = 'Store' }
+      $destDir = Join-Path $destRoot $storeName
+      New-Item -ItemType Directory -Force -Path $destDir | Out-Null
+      $destPath = Join-Path $destDir $msg.Name
+      $n = 1
+      while (Test-Path -LiteralPath $destPath) {
+        $base = [IO.Path]::GetFileNameWithoutExtension($msg.Name)
+        $destPath = Join-Path $destDir ("{0} ({1}).msg" -f $base,$n)
+        $n++
+      }
+      Move-Item -LiteralPath $msg.FullName -Destination $destPath -Force
+    } catch {
+      Write-Warning ("Failed to move MSG to intermediate: {0}" -f $_.Exception.Message)
+    }
+  }
+}
+
+function Save-EmbeddedMsgAttachments {
+  param(
+    [Parameter(Mandatory)][object]$Attachment,
+    [Parameter(Mandatory)][string]$StoreDir,
+    [string]$DefaultAmountFromMail,
+    [switch]$Force
+  )
+  $ext = ''
+  try { $ext = [IO.Path]::GetExtension([string]$Attachment.FileName) } catch {}
+  if (-not $Force -and (-not $ext -or (($ext.ToLower() -ne '.msg') -and ($ext.ToLower() -ne '.eml')))) { return }
+  if (-not $ext) { $ext = '.msg' }
+  $safeOuter = ([string]$Attachment.FileName -replace '[\\/:*?"<>|]','_')
+  if ([string]::IsNullOrWhiteSpace($safeOuter)) { $safeOuter = 'Embedded.msg' }
+  if (-not ($safeOuter.ToLower().EndsWith('.msg') -or $safeOuter.ToLower().EndsWith('.eml'))) { $safeOuter = $safeOuter + '.msg' }
+  $msgPath = Join-Path $StoreDir $safeOuter
+  $n = 1
+  while (Test-Path -LiteralPath $msgPath) {
+    $msgPath = Join-Path $StoreDir ("{0} ({1}).msg" -f ([IO.Path]::GetFileNameWithoutExtension($safeOuter)), $n)
+    $n++
+  }
+  try {
+    $Attachment.SaveAsFile($msgPath)
+    Write-Host ("Saved embedded MSG: {0}" -f $msgPath)
+  } catch {
+    Write-Warning ("Failed to save embedded MSG: {0}" -f $_.Exception.Message)
+    return
+  }
+  try {
+    $outlook = Get-OutlookApp
+    $inner = $outlook.Session.OpenSharedItem($msgPath)
+  } catch {
+    Write-Warning ("Failed to open embedded MSG: {0}" -f $_.Exception.Message)
+    return
+  }
+  if (-not $inner) { return }
+  try {
+    $innerAtts = $inner.Attachments
+    if (-not $innerAtts -or $innerAtts.Count -le 0) { return }
+    $amtFromMail = $DefaultAmountFromMail
+    try { if (-not $amtFromMail) { $amtFromMail = Get-AmountFromMail -Mail $inner } } catch {}
+    for($ji=1; $ji -le $innerAtts.Count; $ji++){
+      $innerAtt = $innerAtts.Item($ji); if (-not $innerAtt) { continue }
+      $innerFn = [string]$innerAtt.FileName
+      if ([string]::IsNullOrWhiteSpace($innerFn)) { continue }
+      $innerLower = $innerFn.ToLower()
+      if ($innerLower -like '*form*' -or $innerLower -like '*supplier*form*' -or $innerLower -like '*statement*' -or $innerLower -like '*stmt*' -or $innerLower -like '*purchase*order*' -or $innerLower -like '*purchaseorder*' -or $innerLower -like '* order *') { continue }
+      if (-not $innerLower.EndsWith('.pdf')) { continue }
+      $safe = $innerFn -replace '[\\/:*?"<>|]','_'
+      $target = $null
+      if ($amtFromMail) {
+        $base = [IO.Path]::GetFileNameWithoutExtension($safe)
+        $extOnly = [IO.Path]::GetExtension($safe)
+        $target = Join-Path $StoreDir ("{0} - {1}{2}" -f $base, ($amtFromMail -replace '[\\/:*?"<>|]','_'), $extOnly)
+        $n=1
+        while (Test-Path -LiteralPath $target) {
+          $target = Join-Path $StoreDir ("{0} ({1}){2}" -f $base, $n, $extOnly)
+          $n++
+        }
+      } else {
+        $target = Join-Path $StoreDir $safe
+        $n=1; while(Test-Path -LiteralPath $target){ $target = Join-Path $StoreDir ("{0} ({1}){2}" -f ([IO.Path]::GetFileNameWithoutExtension($safe)), $n, [IO.Path]::GetExtension($safe)); $n++ }
+      }
+      try {
+        $innerAtt.SaveAsFile($target)
+        $finalPath = $target
+        if (-not $amtFromMail) {
+          $renamed = Try-RenameWithAmount -Path $target
+          if ($renamed -and (Test-Path -LiteralPath $renamed)) {
+            if ($renamed -ne $target -and (Test-Path -LiteralPath $target)) { Remove-Item -LiteralPath $target -Force }
+            $finalPath = $renamed
+          }
+        }
+        Write-Host ("Saved embedded PDF: {0}" -f $finalPath)
+      } catch {
+        Write-Warning ("Failed to save embedded attachment '{0}': {1}" -f $innerFn, $_.Exception.Message)
+      }
+    }
+  } finally {
+    try { $inner.Close(0) | Out-Null } catch {}
   }
 }
 
@@ -345,7 +478,7 @@ try {
 
   $subjectRegex = [regex]::new('remittance|payment\s*advice|remittance\s*advice|payment\s*remittance|funds\s*transfer|eft\s*remittance','IgnoreCase')
   $fileNameRegex = [regex]::new('(remit|remittance|payment[\s_-]*advice|remit[\s_-]*advice|remittance[\s_-]*advice)','IgnoreCase')
-  $allowedExtRegex = [regex]::new('\.(pdf)$','IgnoreCase')
+  $allowedExtRegex = [regex]::new('\.(pdf|msg|eml)$','IgnoreCase')
   $imageExtRegex = [regex]::new('\.(png|jpg|jpeg|gif|bmp|svg|webp)$','IgnoreCase')
   $negativeSubjectRegex = [regex]::new('\b(statement|stmt|supplier\s*form|form|purchase\s*order|order)\b','IgnoreCase')
   $negativeFileNameRegex = [regex]::new('(statement|\bstmt\b|supplier[\s_-]*form|\bform\b|purchase[\s_-]*order|purchaseorder|\border\b|\bpo\d*\b)','IgnoreCase')
@@ -414,11 +547,16 @@ try {
         try { $rt = [datetime]$item.ReceivedTime } catch { $rt = $null }
         if ($rt -and ($rt -lt $start -or $rt -ge $end)) { continue }
         $sender = ''
+        $senderSmtp = ''
         try { $sender = [string]$item.SenderEmailAddress } catch {}
+        try { $smtpTmp = Get-PrimarySmtpAddress -Item $item; if ($smtpTmp) { $senderSmtp = [string]$smtpTmp } } catch {}
         $senderLower = $sender.ToLower()
-        $allowOverride = ($allowAddrs -contains $senderLower)
+        $senderSmtpLower = if ($senderSmtp) { $senderSmtp.ToLower() } else { '' }
+        $allowOverride = ($allowAddrs -contains $senderLower) -or ($senderSmtpLower -and ($allowAddrs -contains $senderSmtpLower))
         if (-not $allowOverride) {
-          if ($senderLower -like '*@novabio.com' -or $blockedAddrs -contains $senderLower) { continue }
+          $isNova = ($senderLower -like '*@novabio.com') -or ($senderSmtpLower -like '*@novabio.com')
+          $isBlockedExact = ($blockedAddrs -contains $senderLower) -or ($senderSmtpLower -and ($blockedAddrs -contains $senderSmtpLower))
+          if ($isNova -or $isBlockedExact) { continue }
         }
         $subj=''; try { $subj=[string]$item.Subject } catch {}
         if ($allowOverride) {
@@ -471,6 +609,15 @@ try {
           if ($seen.Contains($key)) { continue } else { [void]$seen.Add($key) }
 
           $amtFromMail = Get-AmountFromMail -Mail $item
+          $attType = $null; try { $attType = [int]$att.Type } catch {}
+          $extLower = ''; try { $extLower = [IO.Path]::GetExtension($fnLower) } catch {}
+          $isMsgAttachment = ($attType -eq 5 -or $extLower -eq '.msg' -or $extLower -eq '.eml')
+          if (-not $allowedExtRegex.IsMatch($fn) -and -not $isMsgAttachment) { continue }
+          if ($isMsgAttachment) {
+            Save-EmbeddedMsgAttachments -Attachment $att -StoreDir $storeDir -DefaultAmountFromMail $amtFromMail -Force:$true
+            Remember-ProcessedKey -Info $processedInfo -Key $entryKey
+            continue
+          }
           if ($amtFromMail) {
             $base = [IO.Path]::GetFileNameWithoutExtension($safe)
             $ext  = [IO.Path]::GetExtension($safe)
@@ -548,6 +695,11 @@ try {
       }
     } catch {
       Write-Warning ("Secure remittance fetcher failed: {0}" -f $_.Exception.Message)
+    }
+    try {
+      Move-MsgFilesToIntermediate -MsgFiles $msgFiles -SaveRoot $SaveRoot
+    } catch {
+      Write-Warning ("Failed to move MSG files to intermediate: {0}" -f $_.Exception.Message)
     }
   }
   Write-Host ("Saved files under: {0}" -f $SaveRoot)
