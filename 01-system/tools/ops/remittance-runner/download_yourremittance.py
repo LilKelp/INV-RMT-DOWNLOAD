@@ -325,6 +325,10 @@ def discover_jobs(base_dir: Path, date_key: str, stores_filter: Optional[Iterabl
             targets.append(dated)
         if store_dir.exists():
             targets.append(store_dir)
+        run_root = base_dir.parent if base_dir.parent != base_dir else base_dir
+        intermediate = run_root / "intermediate" / "msg-src" / store_dir.name
+        if intermediate.exists():
+            targets.append(intermediate)
         seen = set()
         for target in targets:
             key = str(target.resolve())
