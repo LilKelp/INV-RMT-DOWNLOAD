@@ -76,7 +76,9 @@ def html_from_message(html_body: str, text_body: str) -> str:
 
 
 def extract_ref_amount(text: str) -> Tuple[str, str]:
-    ref_match = re.search(r"EFT Reference Number:\s*([0-9A-Za-z-]+)", text, flags=re.IGNORECASE)
+    # Match "EFT Reference Number: 123" or "Payment Reference Number 123"
+    # Enforce 'Number' to avoid matching headers like "EFT Reference" followed by address text.
+    ref_match = re.search(r"(?:EFT|Payment)\s+Reference\s+Number\s*[:\s]+\s*([0-9A-Za-z-]+)", text, flags=re.IGNORECASE)
     ref = ref_match.group(1).strip() if ref_match else "EFT"
     amt_match = re.search(r"(?im)^Total:\s*([0-9,]+\.\d{2})", text)
     if amt_match:

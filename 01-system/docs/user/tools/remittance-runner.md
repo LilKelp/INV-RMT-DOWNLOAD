@@ -47,5 +47,6 @@ powershell -NoProfile -File 01-system/tools/ops/remittance-runner/run.ps1 -Store
 - If you re-run and need to regrab items, clear the corresponding processed file under `03-outputs/processed/`.
 
 ## Changelog
-- v0.2 (2025-11-27): Documented intermediates, secure fetch, and bundled Poppler auto-detect.
+- v0.4 (2025-12-04): Added support for 'Payment Reference Number' renaming (Barwon Health); added allowed senders (SASH Vets, Barwon Health).
+- v0.3 (2025-11-27): Documented intermediates, secure fetch, and bundled Poppler auto-detect.
 - v0.1 (2025-11-13): Initial version.
