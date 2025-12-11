@@ -19,7 +19,8 @@ param(
     'HSNSW-scnremit@gateway2.messagexchange.com',
     'payables@ap1.fpim.health.nz',
     'accounts-sa@sashvets.com',
-    'AccountsPayable@barwonhealth.org.au'
+    'AccountsPayable@barwonhealth.org.au',
+    'APHealthVendors@sharedservices.sa.gov.au'
   )
 )
 
